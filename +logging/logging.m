@@ -45,6 +45,7 @@ classdef logging < handle
     logfid = -1;
     logcolors = logging.logging.colors_terminal;
     using_terminal;
+    maxLogFileSize = 1024^3; %max logifle size in bytes, default: 10 MB, set to <=0 for unlimited logfile size
   end
 
   properties (Hidden,SetAccess=protected)
@@ -77,7 +78,14 @@ classdef logging < handle
   methods
 
     function setFilename(self, logPath)
-      [self.logfid, message] = fopen(logPath, 'a');
+      logFolder = fileparts(logPath);
+      if(~isfolder(logPath))
+        [status, message, ~] = mkdir(logFolder);
+        if(~status)
+          warning('Could not create folder for logfile: %s\n%s',logFolder,message);
+        end
+      end
+      [self.logfid, message] = fopen(logPath, 'a+');
 
       if self.logfid < 0
         warning(['Problem with supplied logfile path: ' message]);
@@ -85,6 +93,14 @@ classdef logging < handle
       end
 
       self.fullpath = logPath;
+    end
+    
+    function setMaxFileSize(self,val)
+      %set the max size of the log file in bytes (at least 1 kB)
+      if(isnumeric(val) && isscalar(val))
+        self.maxLogFileSize = max(1024,val);
+        self.checkLogFileSize();
+      end
     end
 
     function setCommandWindowLevel(self, level)
@@ -164,9 +180,46 @@ classdef logging < handle
         fclose(self.logfid);
       end
     end
+    
+    function status = checkLogFileSize(self, newLineLen)
+        %check size of log file and reduce if necessary
+        if(nargin == 1)
+            newLineLen = 0;
+        end
+        status = true;
+        if(self.maxLogFileSize > 0)
+            %check file size
+            info = dir(self.fullpath);
+            if(~isempty(info) && isstruct(info) && isfield(info,'bytes'))
+                target = info.bytes + newLineLen - self.maxLogFileSize;
+                if(target > 0)
+                    %log file has grown too big -> delete oldest lines until the new line fits
+                    frewind(self.logfid);
+                    while target > 0
+                        tmpLine = fgetl(self.logfid);
+                        if(isempty(tmpLine) || isnumeric(tmpLine) && isscalar(tmpLine) && tmpLine == -1)
+                            break
+                        end
+                        target = target - length(tmpLine);
+                    end
+                    newLog = fread(self.logfid); %read the data we want to keep
+                    fclose(self.logfid);
+                    %overwrite old logfile with empty file - this is more reliable than delete
+                    tmp = '';
+                    save(self.fullpath,'tmp','-ASCII');
+                    self.setFilename(self.fullpath);
+                    if(self.logfid < 0)
+                        %something went wrong
+                        status = false;
+                        return
+                    end
+                    fwrite(self.logfid, newLog); %write the new logfile
+                end
+            end
+        end
+    end
 
-    function writeLog(self, level, caller, message, varargin)
-        
+    function writeLog(self, level, caller, message, varargin)        
       level = self.getLevelNumber(level);
       if self.commandWindowLevel_ <= level || self.logLevel_ <= level
         timestamp = datestr(now, self.datefmt_);
@@ -184,6 +237,11 @@ classdef logging < handle
       end
 
       if self.logLevel_ <= level && self.logfid > -1
+        %make sure the new logline will fit into the logifle
+        if(~self.checkLogFileSize(length(logline)))
+            %something went wrong
+            return
+        end
         fprintf(self.logfid, '%s', logline);
       end
     end        
@@ -228,7 +286,7 @@ classdef logging < handle
     function level = getLevelNumber(self, level)
     % LEVEL = GETLEVELNUMBER(LEVEL)
     %
-    % Converts charecter-based level names to level numbers
+    % Converts character-based level names to level numbers
     % used internally by logging.
     %
     % If given a number, it makes sure the number is valid
@@ -252,10 +310,23 @@ classdef logging < handle
         message = sprintf(message, varargin{:});
       end
       
-      [rows, ~] = size(message);
-      if rows > 1
-        message = sprintf('\n %s', evalc('disp(message)'));
+      if(iscell(message))
+        [rows, ~] = size(message);
+        if rows > 1
+          message = sprintf('\n %s', evalc('disp(message)'));
+        end
+      elseif(ischar(message))
+          %remove trailing newline characters
+          idx = false(size(message));
+          idx(regexp(message, '[\r\n]')) = true;
+          idx = find(~idx,length(message),'last');
+          if(~isempty(idx))
+              message = message(1:idx(end));
+          end
+          %replace remaining newline characters with ;
+          message(regexp(message, '[\r\n]')) = ';';
       end
+      %to do: add string handling
     end
   
  end
